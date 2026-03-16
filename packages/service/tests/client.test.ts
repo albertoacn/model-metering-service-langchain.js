@@ -16,6 +16,7 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { serve } from '@hono/node-server';
 
 import app from '../src/server';
+import { createApiKey } from '../src/data';
 
 // ---------------------------------------------------------------------------
 // Server lifecycle
@@ -24,7 +25,13 @@ import app from '../src/server';
 let server: Server;
 let baseURL: string;
 
+const VALID_API_KEY = 'example-api-key';
+const UNKNOWN_API_KEY = 'this-key-does-not-exist';
+
 beforeAll(async () => {
+	// Register the key that tests use so the server's lookup succeeds.
+	createApiKey(VALID_API_KEY, 1_000_000);
+
 	await new Promise<void>((resolve) => {
 		// port: 0 lets the OS pick a free port, avoiding hardcoded-port collisions
 		server = serve({ fetch: app.fetch, port: 0 }, (info) => {
@@ -44,7 +51,7 @@ afterAll(async () => {
 // Helper
 // ---------------------------------------------------------------------------
 
-function makeClient(apiKey = 'example-api-key', model = 'cheap-model') {
+function makeClient(apiKey = VALID_API_KEY, model = 'cheap-model') {
 	return new ChatAnthropic({
 		model,
 		apiKey,
@@ -106,8 +113,56 @@ describe('ChatAnthropic proxy', () => {
 		expect(fullText.length).toBeGreaterThan(0);
 	});
 
-	// Future tasks — marked todo so they appear as pending (not red failures)
-	it.todo('should reject an unrecognized api key');
+	/**
+	 * Unknown key rejection test.
+	 *
+	 * We use fetch directly rather than ChatAnthropic because the LangChain
+	 * client wraps HTTP errors in its own exception hierarchy and the raw
+	 * status code is easier to assert on without digging through SDK internals.
+	 */
+	it('should reject an unrecognized api key', async () => {
+		const response = await fetch(`${baseURL}/v1/messages`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': UNKNOWN_API_KEY,
+			},
+			body: JSON.stringify({
+				model: 'cheap-model',
+				messages: [{ role: 'user', content: 'hello' }],
+			}),
+		});
+
+		expect(response.status).toBe(401);
+		const body = await response.json();
+		expect(body).toHaveProperty('error');
+	});
+
+	/**
+	 * Empty key test.
+	 *
+	 * The zod header validator requires x-api-key to be a non-empty string.
+	 * Sending an empty string should be rejected before we even hit the
+	 * getApiKey lookup — zod returns a 400 Bad Request in this case.
+	 */
+	it('should reject an empty api key', async () => {
+		const response = await fetch(`${baseURL}/v1/messages`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': '',
+			},
+			body: JSON.stringify({
+				model: 'cheap-model',
+				messages: [{ role: 'user', content: 'hello' }],
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		const body = await response.json();
+		expect(body).toHaveProperty('error');
+	});
+
 	it.todo('should reject a request that has exceeded the api key token limit');
 });
 

@@ -11,6 +11,7 @@ import { nanoid } from 'nanoid';
 import { z } from 'zod';
 
 import { generate } from './messages/generate';
+import { getApiKey } from './data';
 
 const app = new Hono();
 
@@ -21,7 +22,7 @@ app.post(
 	zValidator(
 		'header',
 		z.object({
-			'x-api-key': z.string(),
+			'x-api-key': z.string().min(1),
 		})
 	),
 	zValidator(
@@ -40,9 +41,12 @@ app.post(
 	async (c) => {
 		try {
 			const { model, messages, stream } = c.req.valid('json');
-			const headers = c.req.valid('header');
-			if (!headers['x-api-key']) {
-				return c.json({ error: 'API key required' }, 401);
+			const { 'x-api-key': apiKey } = c.req.valid('header');
+
+			// Reject unknown keys — zod guarantees apiKey is a non-empty string here,
+			// so we only need to check whether it exists in the store.
+			if (!getApiKey(apiKey)) {
+				return c.json({ error: 'Invalid API key' }, 401);
 			}
 
 			// This is us "calling the model"
