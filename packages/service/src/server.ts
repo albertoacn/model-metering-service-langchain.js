@@ -50,13 +50,7 @@ app.post(
 			const output = generate(prompt, prompt.length * 32);
 
 			if (stream) {
-				/**
-				 * Part of your task is to add streaming support for this endpoint.
-				 * Just like normal message responses, the `ChatAnthropic` client
-				 * can accept a response so long as it complies with the Anthropic API.
-				 * @see https://docs.anthropic.com/en/docs/build-with-claude/streaming
-				 */
-				return c.json({ message: 'Streaming is not currently supported' }, 400);
+				return streamingResponse(model, output, prompt);
 			} else {
 				/**
 				 * The `ChatAnthropic` client can accept any endpoint that returns a response
@@ -96,6 +90,108 @@ app.post(
 		}
 	}
 );
+
+/**
+ * Builds a streaming Server-Sent Events response compatible with the Anthropic
+ * streaming protocol so that `ChatAnthropic.stream()` can consume it.
+ *
+ * Event sequence (mirrors the real Anthropic API):
+ *   message_start       – opens the message envelope with input token count
+ *   content_block_start – announces a single text block at index 0
+ *   ping                – keepalive (Anthropic sends one early in the stream)
+ *   content_block_delta – one event per small chunk of generated text
+ *   content_block_stop  – closes the text block
+ *   message_delta       – carries stop_reason + final output token count
+ *   message_stop        – signals the stream is complete
+ *
+ * @see https://docs.anthropic.com/en/docs/build-with-claude/streaming
+ *
+ * NOTE: `generate()` is synchronous, so the full text is produced upfront and
+ * then emitted in chunks. A real implementation would interleave token
+ * generation with SSE emission.
+ */
+function streamingResponse(model: string, output: string, prompt: string): Response {
+	const messageId = `msg_${nanoid()}`;
+	/**
+ 	 * A rule of thumb is that 1 token is roughly 4 characters.
+ 	 * This isn't always true, so we're using a simple approximation.
+ 	*/
+	const inputTokens = Math.floor(prompt.length / 4);
+	const outputTokens = Math.floor(output.length / 4);
+	const encoder = new TextEncoder();
+
+	/** Encodes a single SSE frame. */
+	const frame = (event: string, data: unknown): Uint8Array =>
+		encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+	/**
+	 * Split output into small word-based chunks so the client receives multiple
+	 * delta events, which exercises the LangChain chunk-reassembly path.
+	 * 5 words per chunk keeps the event count reasonable without being trivial.
+	 */
+	const WORDS_PER_CHUNK = 5;
+	const words = output.split(' ');
+	const textChunks: string[] = [];
+	for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
+		const slice = words.slice(i, i + WORDS_PER_CHUNK).join(' ');
+		// Re-add the inter-chunk space that was removed by split, except at the end
+		textChunks.push(i + WORDS_PER_CHUNK < words.length ? slice + ' ' : slice);
+	}
+
+	const frames: Uint8Array[] = [
+		frame('message_start', {
+			type: 'message_start',
+			message: {
+				id: messageId,
+				type: 'message',
+				role: 'assistant',
+				content: [],
+				model,
+				stop_reason: null,
+				stop_sequence: null,
+				usage: { input_tokens: inputTokens, output_tokens: 0 },
+			},
+		}),
+		frame('content_block_start', {
+			type: 'content_block_start',
+			index: 0,
+			content_block: { type: 'text', text: '' },
+		}),
+		frame('ping', { type: 'ping' }),
+		...textChunks.map((chunk) =>
+			frame('content_block_delta', {
+				type: 'content_block_delta',
+				index: 0,
+				delta: { type: 'text_delta', text: chunk },
+			})
+		),
+		frame('content_block_stop', { type: 'content_block_stop', index: 0 }),
+		frame('message_delta', {
+			type: 'message_delta',
+			delta: { stop_reason: 'end_turn', stop_sequence: null },
+			usage: { output_tokens: outputTokens },
+		}),
+		frame('message_stop', { type: 'message_stop' }),
+	];
+
+	const body = new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (const f of frames) {
+				controller.enqueue(f);
+			}
+			controller.close();
+		},
+	});
+
+	return new Response(body, {
+		status: 200,
+		headers: {
+			'Content-Type': 'text/event-stream',
+			'Cache-Control': 'no-cache',
+			Connection: 'keep-alive',
+		},
+	});
+}
 
 app.onError((err, c) => {
 	console.error('Error:', err);
