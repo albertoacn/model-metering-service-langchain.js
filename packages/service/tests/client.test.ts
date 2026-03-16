@@ -2,12 +2,7 @@
  * Test suite for the ChatAnthropic proxy service.
  *
  * Migrated from vitest to Jest.
- * Jest globals (describe, it, expect, beforeAll, afterAll) are injected
- * automatically — no explicit import needed when using @types/jest.
- *
- * The server is started once before all tests on a random OS-assigned port
- * (port: 0) to avoid collisions with other processes, then torn down cleanly
- * in afterAll so the Jest process exits without hanging.
+ * Jest globals are injected automatically — no explicit import needed.
  */
 
 import type { Server } from 'http';
@@ -52,7 +47,7 @@ afterAll(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Helper
+// Helpers
 // ---------------------------------------------------------------------------
 
 function makeClient(apiKey = VALID_API_KEY, model = 'cheap-model') {
@@ -63,45 +58,26 @@ function makeClient(apiKey = VALID_API_KEY, model = 'cheap-model') {
 	} as ConstructorParameters<typeof ChatAnthropic>[0]);
 }
 
+async function postJSON(path: string, body: unknown, headers: Record<string, string> = {}) {
+	return fetch(`${baseURL}${path}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', ...headers },
+		body: JSON.stringify(body),
+	});
+}
+
 // ---------------------------------------------------------------------------
-// ChatAnthropic proxy tests
+// ChatAnthropic proxy
 // ---------------------------------------------------------------------------
 
 describe('ChatAnthropic proxy', () => {
-	// Existing passing test — unchanged
 	it('should return a message', async () => {
-		const client = makeClient();
-		const result = await client.invoke('hey, how are you?');
+		const result = await makeClient().invoke('hey, how are you?');
 		expect(result).toBeDefined();
 	});
 
-	/**
-	 * Streaming test.
-	 *
-	 * ChatAnthropic.stream() sets "stream": true in the request body.
-	 * The server must respond with an SSE stream that follows the Anthropic
-	 * streaming protocol; the LangChain SDK reassembles the events into
-	 * AIMessageChunk objects that the caller iterates with `for await`.
-	 *
-	 * What we assert and why:
-	 *
-	 *   1. chunks.length > 0
-	 *      The stream must emit at least one chunk — a completely empty stream
-	 *      would mean the SSE connection opened and closed without any deltas,
-	 *      which is broken behaviour.
-	 *
-	 *   2. Every chunk instanceof AIMessageChunk
-	 *      LangChain only emits AIMessageChunk when it has successfully parsed
-	 *      an SSE frame. If any of our event names, shape, or required fields
-	 *      are wrong, the SDK throws before producing a chunk.
-	 *
-	 *   3. Concatenated content is non-empty
-	 *      Verifies that the text_delta values were actually forwarded — not
-	 *      just that the envelope events arrived.
-	 */
 	it('should stream a message', async () => {
-		const client = makeClient();
-		const stream = await client.stream('hey, how are you?');
+		const stream = await makeClient().stream('hey, how are you?');
 
 		const chunks: AIMessageChunk[] = [];
 		for await (const chunk of stream) {
@@ -110,87 +86,42 @@ describe('ChatAnthropic proxy', () => {
 		}
 
 		expect(chunks.length).toBeGreaterThan(0);
-
-		const fullText = chunks
-			.map((c) => (typeof c.content === 'string' ? c.content : ''))
-			.join('');
+		const fullText = chunks.map((c) => (typeof c.content === 'string' ? c.content : '')).join('');
 		expect(fullText.length).toBeGreaterThan(0);
 	});
 
-	/**
-	 * Unknown key rejection test.
-	 *
-	 * We use fetch directly rather than ChatAnthropic because the LangChain
-	 * client wraps HTTP errors in its own exception hierarchy and the raw
-	 * status code is easier to assert on without digging through SDK internals.
-	 */
 	it('should reject an unrecognized api key', async () => {
-		const response = await fetch(`${baseURL}/v1/messages`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': UNKNOWN_API_KEY,
-			},
-			body: JSON.stringify({
-				model: 'cheap-model',
-				messages: [{ role: 'user', content: 'hello' }],
-			}),
-		});
-
-		expect(response.status).toBe(401);
-		const body = await response.json();
-		expect(body).toHaveProperty('error');
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': UNKNOWN_API_KEY }
+		);
+		expect(res.status).toBe(401);
+		expect(await res.json()).toHaveProperty('error');
 	});
 
-	/**
-	 * Empty key test.
-	 *
-	 * The zod header validator requires x-api-key to be a non-empty string.
-	 * Sending an empty string should be rejected before we even hit the
-	 * getApiKey lookup — zod returns a 400 Bad Request in this case.
-	 */
 	it('should reject an empty api key', async () => {
-		const response = await fetch(`${baseURL}/v1/messages`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': '',
-			},
-			body: JSON.stringify({
-				model: 'cheap-model',
-				messages: [{ role: 'user', content: 'hello' }],
-			}),
-		});
-
-		expect(response.status).toBe(400);
-		const body = await response.json();
-		expect(body).toHaveProperty('error');
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': '' }
+		);
+		expect(res.status).toBe(400);
+		expect(await res.json()).toHaveProperty('error');
 	});
 
-	/**
-	 * Exhausted key rejection test.
-	 *
-	 * We seed a key with token_limit = 0 so any request immediately hits the
-	 * cap without needing to generate output first.
-	 */
 	it('should reject a request that has exceeded the api key token limit', async () => {
 		const exhaustedKey = 'exhausted-key';
 		createApiKey(exhaustedKey, 0);
 
-		const response = await fetch(`${baseURL}/v1/messages`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': exhaustedKey,
-			},
-			body: JSON.stringify({
-				model: 'cheap-model',
-				messages: [{ role: 'user', content: 'hello' }],
-			}),
-		});
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': exhaustedKey }
+		);
 
-		expect(response.status).toBe(429);
-		const body = await response.json();
+		expect(res.status).toBe(429);
+		const body = await res.json() as { error: string; token_limit: number; token_count: number };
 		expect(body).toHaveProperty('error');
 		expect(body).toHaveProperty('token_limit');
 		expect(body).toHaveProperty('token_count');
@@ -198,56 +129,37 @@ describe('ChatAnthropic proxy', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Token counting tests
+// Token counting
 // ---------------------------------------------------------------------------
 
 describe('Token counting', () => {
-	/**
-	 * Helper — posts a raw request using METERING_API_KEY and returns the
-	 * parsed JSON response body. Using fetch instead of ChatAnthropic gives us
-	 * direct access to the response shape without the SDK abstracting it away.
-	 */
 	async function postMessage(content: string) {
-		const res = await fetch(`${baseURL}/v1/messages`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': METERING_API_KEY,
-			},
-			body: JSON.stringify({
-				model: 'cheap-model',
-				messages: [{ role: 'user', content }],
-			}),
-		});
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', messages: [{ role: 'user', content }] },
+			{ 'x-api-key': METERING_API_KEY }
+		);
 		return res.json() as Promise<{ usage: { input_tokens: number; output_tokens: number } }>;
 	}
 
 	it('response usage object contains positive input_tokens and output_tokens', async () => {
 		const body = await postMessage('hello, count my tokens');
-
-		expect(body.usage).toBeDefined();
 		expect(body.usage.input_tokens).toBeGreaterThan(0);
 		expect(body.usage.output_tokens).toBeGreaterThan(0);
 	});
 
 	it('usage values are consistent with the 1-token-per-4-chars approximation', async () => {
-		const content = 'a'.repeat(40); // 40 chars → ~10 input tokens
-		const body = await postMessage(content);
-
-		// Allow ±1 for rounding at the floor boundary
+		const body = await postMessage('a'.repeat(40));
 		expect(body.usage.input_tokens).toBeGreaterThanOrEqual(9);
 		expect(body.usage.input_tokens).toBeLessThanOrEqual(11);
 	});
 
 	it('token usage is attributed to the api key after a non-streaming request', async () => {
 		const before = getApiKey(METERING_API_KEY)!.token_count as number;
-
 		const body = await postMessage('attribute these tokens to my key');
-
 		const after = getApiKey(METERING_API_KEY)!.token_count as number;
 		const delta = after - before;
 
-		// The delta must equal exactly what the response reported
 		expect(delta).toBe(body.usage.input_tokens + body.usage.output_tokens);
 		expect(delta).toBeGreaterThan(0);
 	});
@@ -255,20 +167,11 @@ describe('Token counting', () => {
 	it('token usage is attributed to the api key after a streaming request', async () => {
 		const before = getApiKey(METERING_API_KEY)!.token_count as number;
 
-		const res = await fetch(`${baseURL}/v1/messages`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': METERING_API_KEY,
-			},
-			body: JSON.stringify({
-				model: 'cheap-model',
-				stream: true,
-				messages: [{ role: 'user', content: 'stream and count my tokens' }],
-			}),
-		});
-
-		// Drain the stream so the server finishes processing
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', stream: true, messages: [{ role: 'user', content: 'stream and count my tokens' }] },
+			{ 'x-api-key': METERING_API_KEY }
+		);
 		await res.text();
 
 		const after = getApiKey(METERING_API_KEY)!.token_count as number;
@@ -277,51 +180,35 @@ describe('Token counting', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Token limit tests
+// Token limits
 // ---------------------------------------------------------------------------
 
 describe('Token limits', () => {
-	/** Raw POST helper scoped to LIMIT_API_KEY. */
 	async function postMessage(content: string) {
-		return fetch(`${baseURL}/v1/messages`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-api-key': LIMIT_API_KEY,
-			},
-			body: JSON.stringify({
-				model: 'cheap-model',
-				messages: [{ role: 'user', content }],
-			}),
-		});
+		return postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', messages: [{ role: 'user', content }] },
+			{ 'x-api-key': LIMIT_API_KEY }
+		);
 	}
 
 	it('should accept requests while under the token limit', async () => {
-		// Ensure a generous limit is in place before this test
 		setTokenLimit(LIMIT_API_KEY, 1_000_000);
-
-		const res = await postMessage('hello within limit');
-		expect(res.status).toBe(200);
+		expect((await postMessage('hello within limit')).status).toBe(200);
 	});
 
 	it('should reject requests after the token limit is lowered below current usage', async () => {
-		// Force token_count above the new limit by setting limit to 0
 		setTokenLimit(LIMIT_API_KEY, 0);
-
 		const res = await postMessage('this should be rejected');
 		expect(res.status).toBe(429);
-
 		const body = await res.json() as { error: string; token_limit: number };
 		expect(body).toHaveProperty('error');
 		expect(body.token_limit).toBe(0);
 	});
 
 	it('should accept requests again after the token limit is raised', async () => {
-		// Raise limit back above current usage
 		setTokenLimit(LIMIT_API_KEY, 1_000_000);
-
-		const res = await postMessage('back under the limit');
-		expect(res.status).toBe(200);
+		expect((await postMessage('back under the limit')).status).toBe(200);
 	});
 
 	it('PATCH /v1/admin/api-keys/:key updates the token limit', async () => {
@@ -330,7 +217,6 @@ describe('Token limits', () => {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ token_limit: 999 }),
 		});
-
 		expect(res.status).toBe(200);
 		const body = await res.json() as { token_limit: number };
 		expect(body.token_limit).toBe(999);
@@ -342,16 +228,77 @@ describe('Token limits', () => {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ token_limit: 100 }),
 		});
-
 		expect(res.status).toBe(404);
 	});
 });
 
 // ---------------------------------------------------------------------------
-// Management API stubs (future tasks)
+// Unified /v1/messages with explicit provider field
 // ---------------------------------------------------------------------------
 
-describe('Management API', () => {
-	it.todo('should create new api keys');
-	it.todo("should derive cost from an api key's usage");
+describe('Unified /v1/messages with provider field', () => {
+	it('routes to anthropic when provider is explicit', async () => {
+		const res = await postJSON(
+			'/v1/messages',
+			{ provider: 'anthropic', model: 'cheap-model', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': VALID_API_KEY }
+		);
+		expect(res.status).toBe(200);
+		const body = await res.json() as { type: string };
+		expect(body.type).toBe('message');
+	});
+
+	it('routes to openai when provider is explicit', async () => {
+		const res = await postJSON(
+			'/v1/messages',
+			{ provider: 'openai', model: 'gpt-decent', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': VALID_API_KEY }
+		);
+		expect(res.status).toBe(200);
+		const body = await res.json() as { object: string };
+		expect(body.object).toBe('chat.completion');
+	});
+
+	it('routes to gemini when provider is explicit', async () => {
+		const res = await postJSON(
+			'/v1/messages',
+			{ provider: 'gemini', model: 'gemini-decent', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': VALID_API_KEY }
+		);
+		expect(res.status).toBe(200);
+		const body = await res.json() as { candidates: unknown[] };
+		expect(body.candidates).toBeDefined();
+	});
+
+	it('infers provider from model when provider field is omitted', async () => {
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'gpt-decent', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': VALID_API_KEY }
+		);
+		expect(res.status).toBe(200);
+		const body = await res.json() as { object: string };
+		expect(body.object).toBe('chat.completion');
+	});
+
+	it('returns 400 when provider and model are mismatched', async () => {
+		const res = await postJSON(
+			'/v1/messages',
+			{ provider: 'openai', model: 'cheap-model', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': VALID_API_KEY }
+		);
+		expect(res.status).toBe(400);
+		expect(await res.json()).toHaveProperty('error');
+	});
+
+	it('returns 400 when model is unknown and no provider is given', async () => {
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'no-such-model', messages: [{ role: 'user', content: 'hello' }] },
+			{ 'x-api-key': VALID_API_KEY }
+		);
+		expect(res.status).toBe(400);
+		expect(await res.json()).toHaveProperty('error');
+	});
+
 });

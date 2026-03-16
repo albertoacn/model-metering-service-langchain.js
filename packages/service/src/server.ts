@@ -1,259 +1,137 @@
 /**
- * This is the main entry point for the proxy service.
- * It uses Hono to create a server that mocks the Anthropic API.
+ * Server entry point.
+ *
+ * Routes:
+ *   POST /v1/messages          	— unified route, provider chosen via body.provider
+ *   PATCH /v1/admin/api-keys/:key  — update token limit
  */
 
 import { Hono } from 'hono';
 import { logger } from 'hono/logger';
 import { serve } from '@hono/node-server';
 import { zValidator } from '@hono/zod-validator';
-import { nanoid } from 'nanoid';
 import { z } from 'zod';
 
-import { generate } from './messages/generate';
-import { getApiKey, incrementTokenCount, setTokenLimit } from './data';
+import { AnthropicProvider, OpenAIProvider, GeminiProvider } from './providers';
+import type { BaseProvider } from './providers';
+import { getApiKey, setTokenLimit } from './data';
+import { MODELS } from './const';
+import { meter, isMeterError } from './messages/meter';
 
 const app = new Hono();
 
 app.use('*', logger());
 
+// ---------------------------------------------------------------------------
+// Build provider registry — keyed by name for O(1) lookup
+// ---------------------------------------------------------------------------
+
+const ALL_PROVIDERS: BaseProvider[] = [
+	new AnthropicProvider(),
+	new OpenAIProvider(),
+	new GeminiProvider(),
+];
+
+const providerMap = new Map(ALL_PROVIDERS.map((p) => [p.name, p]));
+
+// ---------------------------------------------------------------------------
+// Unified POST /v1/messages
+//
+// Accepts a `provider` field in the request body to explicitly choose which
+// provider handles the request. If omitted, the provider is inferred from the
+// model name via the MODELS registry.
+//
+// Example — explicit provider:
+//   { "provider": "openai", "model": "gpt-decent", "messages": [...] }
+//
+// Example — inferred from model:
+//   { "model": "gpt-decent", "messages": [...] }   → openai
+//   { "model": "cheap-model", "messages": [...] }  → anthropic
+// ---------------------------------------------------------------------------
+
 app.post(
 	'/v1/messages',
-	zValidator(
-		'header',
-		z.object({
-			'x-api-key': z.string().min(1),
-		})
-	),
+	zValidator('header', z.object({ 'x-api-key': z.string().min(1) })),
 	zValidator(
 		'json',
 		z.object({
-			model: z.enum(['cheap-model', 'expensive-model', 'decent-model']),
+			provider: z.enum(['anthropic', 'openai', 'gemini']).optional(),
+			model: z.string().min(1),
 			stream: z.boolean().optional(),
-			messages: z.array(
-				z.object({
-					role: z.enum(['user', 'assistant']),
-					content: z.string(),
-				})
-			),
+			messages: z.array(z.object({ role: z.string(), content: z.string() })),
 		})
 	),
 	async (c) => {
 		try {
-			const { model, messages, stream } = c.req.valid('json');
+			const { provider: explicitProvider, model, messages, stream } = c.req.valid('json');
 			const { 'x-api-key': apiKey } = c.req.valid('header');
 
-			// Reject unknown keys — zod guarantees apiKey is a non-empty string here,
-			// so we only need to check whether it exists in the store.
-			const keyRecord = getApiKey(apiKey);
-			if (!keyRecord) {
-				return c.json({ error: 'Invalid API key' }, 401);
+			// Resolve provider — explicit field takes precedence over model inference
+			const modelConfig = MODELS[model];
+			const providerName = explicitProvider ?? modelConfig?.provider;
+
+			if (!providerName) {
+				return c.json({ error: `Unknown model "${model}". Specify a "provider" field or use a model in the registry.` }, 400);
 			}
 
-			// Reject requests that would exceed the key's token limit.
-			// We check before generating so we never do work we can't bill for.
-			if (keyRecord.token_count >= keyRecord.token_limit) {
+			// Validate that the model belongs to the resolved provider (only when model is in the registry)
+			if (modelConfig && modelConfig.provider !== providerName) {
 				return c.json(
-					{
-						error: 'Token limit exceeded',
-						token_limit: keyRecord.token_limit,
-						token_count: keyRecord.token_count,
-					},
-					429
+					{ error: `Model "${model}" belongs to provider "${modelConfig.provider}", not "${providerName}".` },
+					400
 				);
 			}
 
-			// This is us "calling the model"
-			const prompt = messages.map((m) => m.content).join('\n');
-			const output = generate(prompt, prompt.length * 32);
-
-			/**
- 			 * A rule of thumb is that 1 token is roughly 4 characters.
- 			 * This isn't always true, so we're using a simple approximation.
- 			*/
-			const inputTokens = Math.floor(prompt.length / 4);
-			const outputTokens = Math.floor(output.length / 4);
-
-			// Attribute usage to the API key regardless of streaming mode.
-			incrementTokenCount(apiKey, inputTokens + outputTokens);
-
-			if (stream) {
-				return streamingResponse(model, output, inputTokens, outputTokens);
-			} else {
-				/**
-				 * The `ChatAnthropic` client can accept any endpoint that returns a response
-				 * in the same format as the Anthropic API. This is a simple example of how to do that.
-				 * @see https://docs.anthropic.com/en/api/messages
-				 */
-				return c.json({
-					id: nanoid(),
-					type: 'message',
-					role: 'assistant',
-					content: [{ type: 'text', text: output }],
-					model: model,
-					stop_reason: 'end_turn',
-					stop_sequence: null,
-					usage: {
-						cache_creation: null,
-						cache_creation_input_tokens: null,
-						cache_read_input_tokens: null,
-						server_tool_use: null,
-						service_tier: 'standard',
-						input_tokens: inputTokens,
-						output_tokens: outputTokens,
-					},
-					container: null,
-				});
+			const provider = providerMap.get(providerName);
+			if (!provider) {
+				return c.json({ error: `Provider "${providerName}" is not registered.` }, 400);
 			}
+
+			const prompt = messages.map((m) => m.content).join('\n');
+			const result = meter(apiKey, prompt);
+			if (isMeterError(result)) return c.json(result.body, result.status);
+
+			return provider.handleRequest({ model, messages, stream }, result);
 		} catch (err) {
 			console.error(err);
-			if (err instanceof Error) {
-				return c.json({ error: err.message }, 500);
-			}
-			return c.json({ error: 'Internal server error' }, 500);
+			return c.json({ error: err instanceof Error ? err.message : 'Internal server error' }, 500);
 		}
 	}
 );
 
-/**
- * Builds a streaming Server-Sent Events response compatible with the Anthropic
- * streaming protocol so that `ChatAnthropic.stream()` can consume it.
- *
- * Event sequence (mirrors the real Anthropic API):
- *   message_start       – opens the message envelope with input token count
- *   content_block_start – announces a single text block at index 0
- *   ping                – keepalive (Anthropic sends one early in the stream)
- *   content_block_delta – one event per small chunk of generated text
- *   content_block_stop  – closes the text block
- *   message_delta       – carries stop_reason + final output token count
- *   message_stop        – signals the stream is complete
- *
- * @see https://docs.anthropic.com/en/docs/build-with-claude/streaming
- *
- * NOTE: `generate()` is synchronous, so the full text is produced upfront and
- * then emitted in chunks. A real implementation would interleave token
- * generation with SSE emission.
- */
-function streamingResponse(model: string, output: string, inputTokens: number, outputTokens: number): Response {
-	const messageId = `msg_${nanoid()}`;
-	const encoder = new TextEncoder();
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
 
-	/** Encodes a single SSE frame. */
-	const frame = (event: string, data: unknown): Uint8Array =>
-		encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-
-	/**
-	 * Split output into small word-based chunks so the client receives multiple
-	 * delta events, which exercises the LangChain chunk-reassembly path.
-	 * 5 words per chunk keeps the event count reasonable without being trivial.
-	 */
-	const WORDS_PER_CHUNK = 5;
-	const words = output.split(' ');
-	const textChunks: string[] = [];
-	for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
-		const slice = words.slice(i, i + WORDS_PER_CHUNK).join(' ');
-		// Re-add the inter-chunk space that was removed by split, except at the end
-		textChunks.push(i + WORDS_PER_CHUNK < words.length ? slice + ' ' : slice);
-	}
-
-	const frames: Uint8Array[] = [
-		frame('message_start', {
-			type: 'message_start',
-			message: {
-				id: messageId,
-				type: 'message',
-				role: 'assistant',
-				content: [],
-				model,
-				stop_reason: null,
-				stop_sequence: null,
-				usage: { input_tokens: inputTokens, output_tokens: 0 },
-			},
-		}),
-		frame('content_block_start', {
-			type: 'content_block_start',
-			index: 0,
-			content_block: { type: 'text', text: '' },
-		}),
-		frame('ping', { type: 'ping' }),
-		...textChunks.map((chunk) =>
-			frame('content_block_delta', {
-				type: 'content_block_delta',
-				index: 0,
-				delta: { type: 'text_delta', text: chunk },
-			})
-		),
-		frame('content_block_stop', { type: 'content_block_stop', index: 0 }),
-		frame('message_delta', {
-			type: 'message_delta',
-			delta: { stop_reason: 'end_turn', stop_sequence: null },
-			usage: { output_tokens: outputTokens },
-		}),
-		frame('message_stop', { type: 'message_stop' }),
-	];
-
-	const body = new ReadableStream<Uint8Array>({
-		start(controller) {
-			for (const f of frames) {
-				controller.enqueue(f);
-			}
-			controller.close();
-		},
-	});
-
-	return new Response(body, {
-		status: 200,
-		headers: {
-			'Content-Type': 'text/event-stream',
-			'Cache-Control': 'no-cache',
-			Connection: 'keep-alive',
-		},
-	});
-}
-
-/**
- * PATCH /v1/admin/api-keys/:key
- *
- * Updates the token limit for an existing API key.
- * Setting a limit lower than the current token_count will cause the next
- * request from that key to be rejected immediately.
- */
 app.patch(
 	'/v1/admin/api-keys/:key',
-	zValidator(
-		'json',
-		z.object({
-			token_limit: z.number().int().positive(),
-		})
-	),
+	zValidator('json', z.object({ token_limit: z.number().int().positive() })),
 	(c) => {
 		const key = c.req.param('key');
 		const { token_limit } = c.req.valid('json');
 
-		if (!getApiKey(key)) {
-			return c.json({ error: 'API key not found' }, 404);
-		}
+		if (!getApiKey(key)) return c.json({ error: 'API key not found' }, 404);
 
 		setTokenLimit(key, token_limit);
 		return c.json(getApiKey(key));
 	}
 );
 
+// ---------------------------------------------------------------------------
+// Error handler
+// ---------------------------------------------------------------------------
+
 app.onError((err, c) => {
 	console.error('Error:', err);
-	return c.json(
-		{
-			error: err.message || 'Internal server error',
-		},
-		500
-	);
+	return c.json({ error: err.message || 'Internal server error' }, 500);
 });
 
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+
 if (require.main === module) {
-	serve({
-		fetch: app.fetch,
-		port: parseInt(process.env.PORT || '4780'),
-	});
+	serve({ fetch: app.fetch, port: parseInt(process.env.PORT || '4780') });
 	console.log(`Proxy service running on http://localhost:${process.env.PORT}`);
 }
 
