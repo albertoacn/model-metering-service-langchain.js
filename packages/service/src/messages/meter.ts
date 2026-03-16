@@ -6,9 +6,10 @@
  */
 
 import { generate } from './generate';
-import { getApiKey, incrementTokenCount, incrementCost } from '../db';
+import { getApiKey, incrementTokenCount, incrementCost, resetTokenCount } from '../db';
 import { type Tokenizer, CharApproxTokenizer } from './tokenizer';
 import { TOKEN_COSTS } from '../config/models';
+import { shouldReset } from '../reset-schedule';
 
 export interface MeterError {
 	status: 401 | 429;
@@ -37,20 +38,29 @@ export function meter(
 	apiKey: string,
 	prompt: string,
 	model: string,
-	tokenizer: Tokenizer = new CharApproxTokenizer()
+	tokenizer: Tokenizer = new CharApproxTokenizer(),
+	now: Date = new Date()
 ): MeterError | MeterResult {
 	const keyRecord = getApiKey(apiKey);
 	if (!keyRecord) {
 		return { status: 401, body: { error: 'Invalid API key' } };
 	}
 
-	if (keyRecord.token_count >= keyRecord.token_limit) {
+	// Reset token_count and total_cost if the schedule has elapsed
+	if (shouldReset(keyRecord.reset_at, now)) {
+		resetTokenCount(apiKey);
+	}
+
+	// Re-fetch after potential reset so the budget check sees the fresh count
+	const current = getApiKey(apiKey)!;
+
+	if (current.token_count >= current.token_limit) {
 		return {
 			status: 429,
 			body: {
 				error: 'Token limit exceeded',
-				token_limit: keyRecord.token_limit,
-				token_count: keyRecord.token_count,
+				token_limit: current.token_limit,
+				token_count: current.token_count,
 			},
 		};
 	}

@@ -14,7 +14,7 @@ import { z } from 'zod';
 
 import { AnthropicProvider, OpenAIProvider, GeminiProvider } from './providers';
 import type { BaseProvider } from './providers';
-import { getApiKey, setTokenLimit } from './db';
+import { getApiKey, setTokenLimit, setResetSchedule } from './db';
 import { MODELS } from './config/models';
 import { meter, isMeterError } from './messages/meter';
 
@@ -116,14 +116,19 @@ app.get('/v1/admin/api-keys/:key', (c) => {
 
 app.patch(
 	'/v1/admin/api-keys/:key',
-	zValidator('json', z.object({ token_limit: z.number().int().positive() })),
+	zValidator('json', z.object({
+		token_limit: z.number().int().positive(),
+		reset_schedule: z.enum(['none', 'daily', 'weekly', 'monthly']).optional(),
+	})),
 	(c) => {
 		const key = c.req.param('key');
-		const { token_limit } = c.req.valid('json');
+		const { token_limit, reset_schedule } = c.req.valid('json');
 
 		if (!getApiKey(key)) return c.json({ error: 'API key not found' }, 404);
 
 		setTokenLimit(key, token_limit);
+		if (reset_schedule !== undefined) setResetSchedule(key, reset_schedule);
+
 		return c.json(getApiKey(key));
 	}
 );
