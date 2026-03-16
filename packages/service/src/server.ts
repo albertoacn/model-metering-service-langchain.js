@@ -11,7 +11,7 @@ import { nanoid } from 'nanoid';
 import { z } from 'zod';
 
 import { generate } from './messages/generate';
-import { getApiKey } from './data';
+import { getApiKey, incrementTokenCount } from './data';
 
 const app = new Hono();
 
@@ -53,8 +53,18 @@ app.post(
 			const prompt = messages.map((m) => m.content).join('\n');
 			const output = generate(prompt, prompt.length * 32);
 
+			/**
+ 			 * A rule of thumb is that 1 token is roughly 4 characters.
+ 			 * This isn't always true, so we're using a simple approximation.
+ 			*/
+			const inputTokens = Math.floor(prompt.length / 4);
+			const outputTokens = Math.floor(output.length / 4);
+
+			// Attribute usage to the API key regardless of streaming mode.
+			incrementTokenCount(apiKey, inputTokens + outputTokens);
+
 			if (stream) {
-				return streamingResponse(model, output, prompt);
+				return streamingResponse(model, output, inputTokens, outputTokens);
 			} else {
 				/**
 				 * The `ChatAnthropic` client can accept any endpoint that returns a response
@@ -75,12 +85,8 @@ app.post(
 						cache_read_input_tokens: null,
 						server_tool_use: null,
 						service_tier: 'standard',
-						/**
-						 * A rule of thumb is that 1 token is roughly 4 characters.
-						 * This isn't always true, so we're using a simple approximation.
-						 */
-						input_tokens: Math.floor(prompt.length / 4),
-						output_tokens: Math.floor(output.length / 4),
+						input_tokens: inputTokens,
+						output_tokens: outputTokens,
 					},
 					container: null,
 				});
@@ -114,14 +120,8 @@ app.post(
  * then emitted in chunks. A real implementation would interleave token
  * generation with SSE emission.
  */
-function streamingResponse(model: string, output: string, prompt: string): Response {
+function streamingResponse(model: string, output: string, inputTokens: number, outputTokens: number): Response {
 	const messageId = `msg_${nanoid()}`;
-	/**
- 	 * A rule of thumb is that 1 token is roughly 4 characters.
- 	 * This isn't always true, so we're using a simple approximation.
- 	*/
-	const inputTokens = Math.floor(prompt.length / 4);
-	const outputTokens = Math.floor(output.length / 4);
 	const encoder = new TextEncoder();
 
 	/** Encodes a single SSE frame. */
