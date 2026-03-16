@@ -6,8 +6,9 @@
  */
 
 import { generate } from './generate';
-import { getApiKey, incrementTokenCount } from '../db';
+import { getApiKey, incrementTokenCount, incrementCost } from '../db';
 import { type Tokenizer, CharApproxTokenizer } from './tokenizer';
+import { TOKEN_COSTS } from '../config/models';
 
 export interface MeterError {
 	status: 401 | 429;
@@ -18,21 +19,24 @@ export interface MeterResult {
 	output: string;
 	inputTokens: number;
 	outputTokens: number;
+	cost: number;
 }
 
 /**
  * Validates the API key, enforces the token budget, generates output,
- * and attributes usage — in that order.
+ * computes cost from the model's per-token rate, and attributes both
+ * token usage and cost to the API key.
  *
  * An optional `tokenizer` can be supplied to override the default
  * character-based approximation with any counting strategy.
  *
  * Returns either a MeterError (caller should return an error response)
- * or a MeterResult with the generated text and token counts.
+ * or a MeterResult with the generated text, token counts, and cost.
  */
 export function meter(
 	apiKey: string,
 	prompt: string,
+	model: string,
 	tokenizer: Tokenizer = new CharApproxTokenizer()
 ): MeterError | MeterResult {
 	const keyRecord = getApiKey(apiKey);
@@ -54,10 +58,13 @@ export function meter(
 	const output = generate(prompt, prompt.length * 32);
 	const inputTokens = tokenizer.count(prompt);
 	const outputTokens = tokenizer.count(output);
+	const costPerToken = TOKEN_COSTS[model] ?? 0;
+	const cost = (inputTokens + outputTokens) * costPerToken;
 
 	incrementTokenCount(apiKey, inputTokens + outputTokens);
+	incrementCost(apiKey, cost);
 
-	return { output, inputTokens, outputTokens };
+	return { output, inputTokens, outputTokens, cost };
 }
 
 export function isMeterError(result: MeterError | MeterResult): result is MeterError {

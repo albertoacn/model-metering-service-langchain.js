@@ -88,7 +88,7 @@ app.post(
 			}
 
 			const prompt = messages.map((m) => m.content).join('\n');
-			const result = meter(apiKey, prompt);
+			const result = meter(apiKey, prompt, model);
 			if (isMeterError(result)) return c.json(result.body, result.status);
 
 			return provider.handleRequest({ model, messages, stream }, result);
@@ -102,6 +102,17 @@ app.post(
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
+
+/**
+ * GET /v1/admin/api-keys/:key
+ *
+ * Reports current usage and accumulated cost for an API key.
+ */
+app.get('/v1/admin/api-keys/:key', (c) => {
+	const record = getApiKey(c.req.param('key'));
+	if (!record) return c.json({ error: 'API key not found' }, 404);
+	return c.json(record);
+});
 
 app.patch(
 	'/v1/admin/api-keys/:key',

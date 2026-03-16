@@ -12,6 +12,7 @@ import { serve } from '@hono/node-server';
 
 import app from '../src/server';
 import { createApiKey, getApiKey, setTokenLimit } from '../src/db';
+import { TOKEN_COSTS } from '../src/config/models';
 
 // ---------------------------------------------------------------------------
 // Server lifecycle
@@ -301,4 +302,84 @@ describe('Unified /v1/messages with provider field', () => {
 		expect(await res.json()).toHaveProperty('error');
 	});
 
+});
+
+describe('Cost tracking', () => {
+	const COST_API_KEY = 'cost-tracking-key';
+
+	beforeAll(() => {
+		createApiKey(COST_API_KEY, 1_000_000);
+	});
+
+	async function postMessage(model: string, content: string) {
+		const res = await postJSON(
+			'/v1/messages',
+			{ model, messages: [{ role: 'user', content }] },
+			{ 'x-api-key': COST_API_KEY }
+		);
+		return res.json() as Promise<Record<string, unknown>>;
+	}
+
+	it('total_cost starts at 0 for a new key', () => {
+		const record = getApiKey(COST_API_KEY)!;
+		expect(record.total_cost as number).toBe(0);
+	});
+
+	it('total_cost increases after a request', async () => {
+		const before = getApiKey(COST_API_KEY)!.total_cost as number;
+		await postMessage('cheap-model', 'hello cost tracking');
+		const after = getApiKey(COST_API_KEY)!.total_cost as number;
+		expect(after).toBeGreaterThan(before);
+	});
+
+	it('cost is proportional to token count x model rate', async () => {
+		const key = 'cost-proportional-key';
+		createApiKey(key, 1_000_000);
+
+		const prompt = 'aaaa'; // 4 chars -> 1 input token (CharApprox)
+		const res = await postJSON(
+			'/v1/messages',
+			{ model: 'cheap-model', messages: [{ role: 'user', content: prompt }] },
+			{ 'x-api-key': key }
+		);
+		const body = await res.json() as { usage: { input_tokens: number; output_tokens: number } };
+		const record = getApiKey(key)!;
+
+		const expectedCost =
+			(body.usage.input_tokens + body.usage.output_tokens) * TOKEN_COSTS['cheap-model'];
+
+		expect(record.total_cost as number).toBeCloseTo(expectedCost, 10);
+	});
+
+	it('more expensive models accumulate higher cost for equal token counts', async () => {
+		const cheapKey = 'cost-cheap-key';
+		const expensiveKey = 'cost-expensive-key';
+		createApiKey(cheapKey, 1_000_000);
+		createApiKey(expensiveKey, 1_000_000);
+
+		const content = 'same prompt same length';
+		await postJSON('/v1/messages', { model: 'cheap-model', messages: [{ role: 'user', content }] }, { 'x-api-key': cheapKey });
+		await postJSON('/v1/messages', { model: 'expensive-model', messages: [{ role: 'user', content }] }, { 'x-api-key': expensiveKey });
+
+		const cheapCost = getApiKey(cheapKey)!.total_cost as number;
+		const expensiveCost = getApiKey(expensiveKey)!.total_cost as number;
+
+		expect(expensiveCost).toBeGreaterThan(cheapCost);
+	});
+
+	it('GET /v1/admin/api-keys/:key reports total_cost', async () => {
+		await postMessage('cheap-model', 'trigger some cost');
+
+		const res = await fetch(`${baseURL}/v1/admin/api-keys/${COST_API_KEY}`);
+		expect(res.status).toBe(200);
+
+		const body = await res.json() as { total_cost: number; token_count: number };
+		expect(body.total_cost).toBeGreaterThan(0);
+		expect(body.token_count).toBeGreaterThan(0);
+	});
+
+	it('GET /v1/admin/api-keys/:key returns 404 for unknown key', async () => {
+		const res = await fetch(`${baseURL}/v1/admin/api-keys/nonexistent-key`);
+		expect(res.status).toBe(404);
+	});
 });

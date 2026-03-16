@@ -45,7 +45,7 @@ describe('Tokenizer interface', () => {
 		const apiKey = 'tokenizer-conformance-key';
 		createApiKey(apiKey, 1_000_000);
 
-		const result = meter(apiKey, 'any prompt', fixedTokenizer);
+		const result = meter(apiKey, 'any prompt', 'cheap-model', fixedTokenizer);
 		if (isMeterError(result)) throw new Error('Expected MeterResult');
 
 		expect(result.inputTokens).toBe(10);
@@ -63,31 +63,30 @@ describe('meter() tokenizer integration', () => {
 		const spyTokenizer: Tokenizer = {
 			count(text) {
 				counted.push(text);
-				return text.length; // 1 token per char, easy to assert
+				return text.length;
 			},
 		};
 
 		const apiKey = 'tokenizer-spy-key';
 		createApiKey(apiKey, 1_000_000);
 
-		const result = meter(apiKey, 'hello', spyTokenizer);
+		const result = meter(apiKey, 'hello', 'cheap-model', spyTokenizer);
 		if (isMeterError(result)) throw new Error('Expected MeterResult');
 
-		// count() must have been called for both input and output
 		expect(counted.length).toBe(2);
 		expect(result.inputTokens).toBe('hello'.length);
 	});
 
 	it('default tokenizer behaves like CharApproxTokenizer', () => {
-		const prompt = 'the quick brown fox'; // 19 chars → floor(19/4) = 4
+		const prompt = 'the quick brown fox';
 
 		const defaultKey = 'tokenizer-default-key';
 		const charKey = 'tokenizer-char-key';
 		createApiKey(defaultKey, 1_000_000);
 		createApiKey(charKey, 1_000_000);
 
-		const defaultResult = meter(defaultKey, prompt);
-		const charResult = meter(charKey, prompt, new CharApproxTokenizer());
+		const defaultResult = meter(defaultKey, prompt, 'cheap-model');
+		const charResult = meter(charKey, prompt, 'cheap-model', new CharApproxTokenizer());
 
 		if (isMeterError(defaultResult) || isMeterError(charResult)) {
 			throw new Error('Expected MeterResult');
