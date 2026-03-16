@@ -6,9 +6,9 @@
  */
 
 import { generate } from './generate';
-import { getApiKey, incrementTokenCount, incrementCost, resetTokenCount } from '../db';
+import { getApiKey, incrementTokenCount, incrementCost, resetTokenCount, recordUsage } from '../db';
 import { type Tokenizer, CharApproxTokenizer } from './tokenizer';
-import { TOKEN_COSTS } from '../config/models';
+import { TOKEN_COSTS, MODELS } from '../config/models';
 import { shouldReset } from '../reset-schedule';
 
 export interface MeterError {
@@ -73,6 +73,15 @@ export function meter(
 
 	incrementTokenCount(apiKey, inputTokens + outputTokens);
 	incrementCost(apiKey, cost);
+	recordUsage(
+		apiKey,
+		model,
+		MODELS[model]?.provider ?? 'unknown',
+		inputTokens,
+		outputTokens,
+		cost,
+		now.toISOString()
+	);
 
 	return { output, inputTokens, outputTokens, cost };
 }

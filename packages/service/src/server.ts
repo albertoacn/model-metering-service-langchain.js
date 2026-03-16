@@ -14,7 +14,7 @@ import { z } from 'zod';
 
 import { AnthropicProvider, OpenAIProvider, GeminiProvider } from './providers';
 import type { BaseProvider } from './providers';
-import { getApiKey, setTokenLimit, setResetSchedule } from './db';
+import { getApiKey, setTokenLimit, setResetSchedule, getUsageHistory, getUsageSummary } from './db';
 import { MODELS } from './config/models';
 import { meter, isMeterError } from './messages/meter';
 import { rateLimiterMiddleware } from './rate-limiter/middleware';
@@ -114,6 +114,34 @@ app.get('/v1/admin/api-keys/:key', (c) => {
 	const record = getApiKey(c.req.param('key'));
 	if (!record) return c.json({ error: 'API key not found' }, 404);
 	return c.json(record);
+});
+
+/**
+ * GET /v1/admin/api-keys/:key/usage
+ *
+ * Returns individual usage events for a key, newest first.
+ * Optional query params: from, to
+ */
+app.get('/v1/admin/api-keys/:key/usage', (c) => {
+	const key = c.req.param('key');
+	if (!getApiKey(key)) return c.json({ error: 'API key not found' }, 404);
+
+	const { from, to } = c.req.query();
+	return c.json(getUsageHistory(key, from, to));
+});
+
+/**
+ * GET /v1/admin/api-keys/:key/usage/summary
+ *
+ * Returns usage aggregated by date and model, newest first.
+ * Optional query params: from, to
+ */
+app.get('/v1/admin/api-keys/:key/usage/summary', (c) => {
+	const key = c.req.param('key');
+	if (!getApiKey(key)) return c.json({ error: 'API key not found' }, 404);
+
+	const { from, to } = c.req.query();
+	return c.json(getUsageSummary(key, from, to));
 });
 
 app.patch(

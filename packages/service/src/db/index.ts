@@ -30,6 +30,19 @@ db.exec(`
     api_key  TEXT    PRIMARY KEY,
     count    INTEGER NOT NULL DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS usage_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    api_key       TEXT    NOT NULL,
+    ts            TEXT    NOT NULL,
+    model         TEXT    NOT NULL,
+    provider      TEXT    NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost          REAL    NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_usage_events_api_key_ts ON usage_events (api_key, ts);
 `);
 
 export interface ApiKeyRecord {
@@ -73,6 +86,96 @@ export function setResetSchedule(apiKey: string, schedule: ResetSchedule) {
 	const resetAt = getInitialResetAt(schedule);
 	const stmt = db.prepare('UPDATE api_keys SET reset_schedule = ?, reset_at = ? WHERE api_key = ?');
 	return stmt.run(schedule, resetAt, apiKey);
+}
+
+// ---------------------------------------------------------------------------
+// Usage tracking
+// ---------------------------------------------------------------------------
+
+export interface UsageEvent {
+	id: number;
+	api_key: string;
+	ts: string;
+	model: string;
+	provider: string;
+	input_tokens: number;
+	output_tokens: number;
+	cost: number;
+}
+
+export interface UsageSummaryRow {
+	date: string;
+	model: string;
+	provider: string;
+	requests: number;
+	input_tokens: number;
+	output_tokens: number;
+	total_tokens: number;
+	cost: number;
+}
+
+export function recordUsage(
+	apiKey: string,
+	model: string,
+	provider: string,
+	inputTokens: number,
+	outputTokens: number,
+	cost: number,
+	ts: string = new Date().toISOString()
+) {
+	db.prepare(
+		`INSERT INTO usage_events (api_key, ts, model, provider, input_tokens, output_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`
+	).run(apiKey, ts, model, provider, inputTokens, outputTokens, cost);
+}
+
+/**
+ * Returns individual usage events for a key, newest first.
+ * Optionally filtered by `from` / `to` timestamps.
+ */
+export function getUsageHistory(
+	apiKey: string,
+	from?: string,
+	to?: string
+): UsageEvent[] {
+	let sql = 'SELECT * FROM usage_events WHERE api_key = ?';
+	const params: (string | number)[] = [apiKey];
+
+	if (from) { sql += ' AND ts >= ?'; params.push(from); }
+	if (to)   { sql += ' AND ts <= ?'; params.push(to); }
+
+	sql += ' ORDER BY ts DESC';
+	return db.prepare(sql).all(...params) as unknown as UsageEvent[];
+}
+
+/**
+ * Returns aggregated usage grouped by calendar date and model, newest first.
+ * Optionally filtered `from` / `to` timestamps.
+ */
+export function getUsageSummary(
+	apiKey: string,
+	from?: string,
+	to?: string
+): UsageSummaryRow[] {
+	let sql = `
+		SELECT
+			date(ts) AS date,
+			model,
+			provider,
+			COUNT(*)                          AS requests,
+			SUM(input_tokens)                 AS input_tokens,
+			SUM(output_tokens)                AS output_tokens,
+			SUM(input_tokens + output_tokens) AS total_tokens,
+			SUM(cost)                         AS cost
+		FROM usage_events
+		WHERE api_key = ?`;
+	const params: (string | number)[] = [apiKey];
+
+	if (from) { sql += ' AND ts >= ?'; params.push(from); }
+	if (to)   { sql += ' AND ts <= ?'; params.push(to); }
+
+	sql += ' GROUP BY date(ts), model ORDER BY date DESC, model';
+	return db.prepare(sql).all(...params) as unknown as UsageSummaryRow[];
 }
 
 /**
