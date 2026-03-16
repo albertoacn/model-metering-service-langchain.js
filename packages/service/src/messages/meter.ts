@@ -6,7 +6,7 @@
  */
 
 import { generate } from './generate';
-import { getApiKey, incrementTokenCount } from '../data';
+import { getApiKey, incrementTokenCount } from '../db';
 
 export interface MeterError {
 	status: 401 | 429;

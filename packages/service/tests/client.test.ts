@@ -11,7 +11,7 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { serve } from '@hono/node-server';
 
 import app from '../src/server';
-import { createApiKey, getApiKey, setTokenLimit } from '../src/data';
+import { createApiKey, getApiKey, setTokenLimit } from '../src/db';
 
 // ---------------------------------------------------------------------------
 // Server lifecycle
