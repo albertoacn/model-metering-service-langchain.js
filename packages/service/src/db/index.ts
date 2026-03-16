@@ -1,11 +1,17 @@
 /**
- * In-memory SQLite storage for API key metering data.
+ * SQLite storage for API key metering data.
+ *
+ * Storage location is controlled by the DB_PATH environment variable:
+ *
+ *   DB_PATH=./data.db   node dist/server.js   — file-backed, survives restarts
+ *   (unset)                                   — falls back to :memory:
  */
 
 import { DatabaseSync } from 'node:sqlite';
 import type { ResetSchedule } from '../reset-schedule';
 
-const db = new DatabaseSync(':memory:');
+const dbPath = process.env.DB_PATH ?? ':memory:';
+const db = new DatabaseSync(dbPath);
 
 export { db };
 
