@@ -7,14 +7,28 @@ import type { ResetSchedule } from '../reset-schedule';
 
 const db = new DatabaseSync(':memory:');
 
+export { db };
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS api_keys (
-    api_key         TEXT    PRIMARY KEY,
-    token_limit     INTEGER NOT NULL,
-    token_count     INTEGER NOT NULL DEFAULT 0,
-    total_cost      REAL    NOT NULL DEFAULT 0,
-    reset_schedule  TEXT    NOT NULL DEFAULT 'none',
-    reset_at        TEXT
+    api_key              TEXT    PRIMARY KEY,
+    token_limit          INTEGER NOT NULL,
+    token_count          INTEGER NOT NULL DEFAULT 0,
+    total_cost           REAL    NOT NULL DEFAULT 0,
+    reset_schedule       TEXT    NOT NULL DEFAULT 'none',
+    reset_at             TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS request_log (
+    api_key    TEXT    NOT NULL,
+    ts         INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_request_log_api_key_ts ON request_log (api_key, ts);
+
+  CREATE TABLE IF NOT EXISTS concurrent_requests (
+    api_key  TEXT    PRIMARY KEY,
+    count    INTEGER NOT NULL DEFAULT 0
   );
 `);
 

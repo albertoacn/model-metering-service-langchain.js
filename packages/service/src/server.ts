@@ -3,7 +3,7 @@
  *
  * Routes:
  *   POST /v1/messages          	— unified route, provider chosen via body.provider
- *   PATCH /v1/admin/api-keys/:key  — update token limit
+ *   PATCH /v1/admin/api-keys/:key 	— update token limit
  */
 
 import { Hono } from 'hono';
@@ -17,6 +17,7 @@ import type { BaseProvider } from './providers';
 import { getApiKey, setTokenLimit, setResetSchedule } from './db';
 import { MODELS } from './config/models';
 import { meter, isMeterError } from './messages/meter';
+import { rateLimiterMiddleware } from './rate-limiter/middleware';
 
 const app = new Hono();
 
@@ -52,6 +53,7 @@ const providerMap = new Map(ALL_PROVIDERS.map((p) => [p.name, p]));
 app.post(
 	'/v1/messages',
 	zValidator('header', z.object({ 'x-api-key': z.string().min(1) })),
+	rateLimiterMiddleware,
 	zValidator(
 		'json',
 		z.object({
