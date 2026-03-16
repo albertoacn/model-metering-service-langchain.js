@@ -7,6 +7,7 @@
 
 import { generate } from './generate';
 import { getApiKey, incrementTokenCount } from '../db';
+import { type Tokenizer, CharApproxTokenizer } from './tokenizer';
 
 export interface MeterError {
 	status: 401 | 429;
@@ -23,10 +24,17 @@ export interface MeterResult {
  * Validates the API key, enforces the token budget, generates output,
  * and attributes usage — in that order.
  *
+ * An optional `tokenizer` can be supplied to override the default
+ * character-based approximation with any counting strategy.
+ *
  * Returns either a MeterError (caller should return an error response)
  * or a MeterResult with the generated text and token counts.
  */
-export function meter(apiKey: string, prompt: string): MeterError | MeterResult {
+export function meter(
+	apiKey: string,
+	prompt: string,
+	tokenizer: Tokenizer = new CharApproxTokenizer()
+): MeterError | MeterResult {
 	const keyRecord = getApiKey(apiKey);
 	if (!keyRecord) {
 		return { status: 401, body: { error: 'Invalid API key' } };
@@ -44,8 +52,8 @@ export function meter(apiKey: string, prompt: string): MeterError | MeterResult 
 	}
 
 	const output = generate(prompt, prompt.length * 32);
-	const inputTokens = Math.floor(prompt.length / 4);
-	const outputTokens = Math.floor(output.length / 4);
+	const inputTokens = tokenizer.count(prompt);
+	const outputTokens = tokenizer.count(output);
 
 	incrementTokenCount(apiKey, inputTokens + outputTokens);
 
