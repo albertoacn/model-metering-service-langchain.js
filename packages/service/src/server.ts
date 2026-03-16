@@ -14,10 +14,11 @@ import { z } from 'zod';
 
 import { AnthropicProvider, OpenAIProvider, GeminiProvider } from './providers';
 import type { BaseProvider } from './providers';
-import { getApiKey, setTokenLimit, setResetSchedule, getUsageHistory, getUsageSummary } from './db';
+import { getApiKey, getAllApiKeys, setTokenLimit, setResetSchedule, getUsageHistory, getUsageSummary, createApiKey } from './db';
 import { MODELS } from './config/models';
 import { meter, isMeterError } from './messages/meter';
 import { rateLimiterMiddleware } from './rate-limiter/middleware';
+import { adminUI } from './admin/ui';
 
 const app = new Hono();
 
@@ -104,6 +105,32 @@ app.post(
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
+
+/** GET /admin — web interface */
+app.get('/admin', (c) => {
+	return c.html(adminUI());
+});
+
+/** GET /v1/admin/api-keys — list all keys */
+app.get('/v1/admin/api-keys', (c) => {
+	return c.json(getAllApiKeys());
+});
+
+/** POST /v1/admin/api-keys — create a new key */
+app.post(
+	'/v1/admin/api-keys',
+	zValidator('json', z.object({
+		api_key: z.string().min(1),
+		token_limit: z.number().int().positive(),
+		reset_schedule: z.enum(['none', 'daily', 'weekly', 'monthly']).optional(),
+	})),
+	(c) => {
+		const { api_key, token_limit, reset_schedule = 'none' } = c.req.valid('json');
+		if (getApiKey(api_key)) return c.json({ error: 'API key already exists' }, 409);
+		createApiKey(api_key, token_limit, reset_schedule);
+		return c.json(getApiKey(api_key), 201);
+	}
+);
 
 /**
  * GET /v1/admin/api-keys/:key

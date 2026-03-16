@@ -67,6 +67,10 @@ export function getApiKey(apiKey: string) {
 	return stmt.get(apiKey) as ApiKeyRecord | undefined;
 }
 
+export function getAllApiKeys(): ApiKeyRecord[] {
+	return db.prepare('SELECT * FROM api_keys ORDER BY api_key').all() as unknown as ApiKeyRecord[];
+}
+
 export function incrementTokenCount(apiKey: string, amount: number) {
 	const stmt = db.prepare('UPDATE api_keys SET token_count = token_count + ? WHERE api_key = ?');
 	return stmt.run(amount, apiKey);
@@ -150,7 +154,7 @@ export function getUsageHistory(
 
 /**
  * Returns aggregated usage grouped by calendar date and model, newest first.
- * Optionally filtered `from` / `to` timestamps.
+ * Optionally filtered by `from` / `to` timestamps.
  */
 export function getUsageSummary(
 	apiKey: string,
