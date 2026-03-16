@@ -16,7 +16,7 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { serve } from '@hono/node-server';
 
 import app from '../src/server';
-import { createApiKey, getApiKey } from '../src/data';
+import { createApiKey, getApiKey, setTokenLimit } from '../src/data';
 
 // ---------------------------------------------------------------------------
 // Server lifecycle
@@ -26,15 +26,15 @@ let server: Server;
 let baseURL: string;
 
 const VALID_API_KEY = 'example-api-key';
-const UNKNOWN_API_KEY = 'sk-this-key-does-not-exist';
-// Isolated key used only by token-counting tests so usage from other tests
-// doesn't pollute the count we assert on.
+const UNKNOWN_API_KEY = 'this-key-does-not-exist';
 const METERING_API_KEY = 'metering-test-key';
+const LIMIT_API_KEY = 'limit-test-key';
 
 beforeAll(async () => {
 	// Register the key that tests use so the server's lookup succeeds.
 	createApiKey(VALID_API_KEY, 1_000_000);
 	createApiKey(METERING_API_KEY, 1_000_000);
+	createApiKey(LIMIT_API_KEY, 1_000_000);
 
 	await new Promise<void>((resolve) => {
 		// port: 0 lets the OS pick a free port, avoiding hardcoded-port collisions
@@ -167,7 +167,34 @@ describe('ChatAnthropic proxy', () => {
 		expect(body).toHaveProperty('error');
 	});
 
-	it.todo('should reject a request that has exceeded the api key token limit');
+	/**
+	 * Exhausted key rejection test.
+	 *
+	 * We seed a key with token_limit = 0 so any request immediately hits the
+	 * cap without needing to generate output first.
+	 */
+	it('should reject a request that has exceeded the api key token limit', async () => {
+		const exhaustedKey = 'exhausted-key';
+		createApiKey(exhaustedKey, 0);
+
+		const response = await fetch(`${baseURL}/v1/messages`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': exhaustedKey,
+			},
+			body: JSON.stringify({
+				model: 'cheap-model',
+				messages: [{ role: 'user', content: 'hello' }],
+			}),
+		});
+
+		expect(response.status).toBe(429);
+		const body = await response.json();
+		expect(body).toHaveProperty('error');
+		expect(body).toHaveProperty('token_limit');
+		expect(body).toHaveProperty('token_count');
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -250,11 +277,81 @@ describe('Token counting', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Token limit tests
+// ---------------------------------------------------------------------------
+
+describe('Token limits', () => {
+	/** Raw POST helper scoped to LIMIT_API_KEY. */
+	async function postMessage(content: string) {
+		return fetch(`${baseURL}/v1/messages`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': LIMIT_API_KEY,
+			},
+			body: JSON.stringify({
+				model: 'cheap-model',
+				messages: [{ role: 'user', content }],
+			}),
+		});
+	}
+
+	it('should accept requests while under the token limit', async () => {
+		// Ensure a generous limit is in place before this test
+		setTokenLimit(LIMIT_API_KEY, 1_000_000);
+
+		const res = await postMessage('hello within limit');
+		expect(res.status).toBe(200);
+	});
+
+	it('should reject requests after the token limit is lowered below current usage', async () => {
+		// Force token_count above the new limit by setting limit to 0
+		setTokenLimit(LIMIT_API_KEY, 0);
+
+		const res = await postMessage('this should be rejected');
+		expect(res.status).toBe(429);
+
+		const body = await res.json() as { error: string; token_limit: number };
+		expect(body).toHaveProperty('error');
+		expect(body.token_limit).toBe(0);
+	});
+
+	it('should accept requests again after the token limit is raised', async () => {
+		// Raise limit back above current usage
+		setTokenLimit(LIMIT_API_KEY, 1_000_000);
+
+		const res = await postMessage('back under the limit');
+		expect(res.status).toBe(200);
+	});
+
+	it('PATCH /v1/admin/api-keys/:key updates the token limit', async () => {
+		const res = await fetch(`${baseURL}/v1/admin/api-keys/${LIMIT_API_KEY}`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ token_limit: 999 }),
+		});
+
+		expect(res.status).toBe(200);
+		const body = await res.json() as { token_limit: number };
+		expect(body.token_limit).toBe(999);
+	});
+
+	it('PATCH /v1/admin/api-keys/:key returns 404 for unknown key', async () => {
+		const res = await fetch(`${baseURL}/v1/admin/api-keys/nonexistent-key`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ token_limit: 100 }),
+		});
+
+		expect(res.status).toBe(404);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Management API stubs (future tasks)
 // ---------------------------------------------------------------------------
 
 describe('Management API', () => {
 	it.todo('should create new api keys');
-	it.todo('should set new token limits for existing api keys');
 	it.todo("should derive cost from an api key's usage");
 });

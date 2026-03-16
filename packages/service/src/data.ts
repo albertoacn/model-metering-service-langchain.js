@@ -1,7 +1,5 @@
 /**
- * This is an example implementation of how you might store data for this task.
- * You can use this as a starting point, or you can use a different persistence method.
- * (requires Node v24 or later)
+ * In-memory SQLite storage for API key metering data.
  */
 
 import { DatabaseSync } from 'node:sqlite';
@@ -23,10 +21,15 @@ export function createApiKey(apiKey: string, tokenLimit: number) {
 
 export function getApiKey(apiKey: string) {
 	const stmt = db.prepare('SELECT * FROM api_keys WHERE api_key = ?');
-	return stmt.get(apiKey);
+	return stmt.get(apiKey) as { api_key: string; token_limit: number; token_count: number } | undefined;
 }
 
 export function incrementTokenCount(apiKey: string, amount: number) {
 	const stmt = db.prepare('UPDATE api_keys SET token_count = token_count + ? WHERE api_key = ?');
 	return stmt.run(amount, apiKey);
+}
+
+export function setTokenLimit(apiKey: string, tokenLimit: number) {
+	const stmt = db.prepare('UPDATE api_keys SET token_limit = ? WHERE api_key = ?');
+	return stmt.run(tokenLimit, apiKey);
 }

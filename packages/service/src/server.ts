@@ -11,7 +11,7 @@ import { nanoid } from 'nanoid';
 import { z } from 'zod';
 
 import { generate } from './messages/generate';
-import { getApiKey, incrementTokenCount } from './data';
+import { getApiKey, incrementTokenCount, setTokenLimit } from './data';
 
 const app = new Hono();
 
@@ -45,8 +45,22 @@ app.post(
 
 			// Reject unknown keys — zod guarantees apiKey is a non-empty string here,
 			// so we only need to check whether it exists in the store.
-			if (!getApiKey(apiKey)) {
+			const keyRecord = getApiKey(apiKey);
+			if (!keyRecord) {
 				return c.json({ error: 'Invalid API key' }, 401);
+			}
+
+			// Reject requests that would exceed the key's token limit.
+			// We check before generating so we never do work we can't bill for.
+			if (keyRecord.token_count >= keyRecord.token_limit) {
+				return c.json(
+					{
+						error: 'Token limit exceeded',
+						token_limit: keyRecord.token_limit,
+						token_count: keyRecord.token_count,
+					},
+					429
+				);
 			}
 
 			// This is us "calling the model"
@@ -196,6 +210,34 @@ function streamingResponse(model: string, output: string, inputTokens: number, o
 		},
 	});
 }
+
+/**
+ * PATCH /v1/admin/api-keys/:key
+ *
+ * Updates the token limit for an existing API key.
+ * Setting a limit lower than the current token_count will cause the next
+ * request from that key to be rejected immediately.
+ */
+app.patch(
+	'/v1/admin/api-keys/:key',
+	zValidator(
+		'json',
+		z.object({
+			token_limit: z.number().int().positive(),
+		})
+	),
+	(c) => {
+		const key = c.req.param('key');
+		const { token_limit } = c.req.valid('json');
+
+		if (!getApiKey(key)) {
+			return c.json({ error: 'API key not found' }, 404);
+		}
+
+		setTokenLimit(key, token_limit);
+		return c.json(getApiKey(key));
+	}
+);
 
 app.onError((err, c) => {
 	console.error('Error:', err);
